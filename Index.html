@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ASU Full Plant Operations Simulator (PID Training View)</title>
+    <title>ASU Simulator (PID Training View)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <style>
@@ -30,7 +30,7 @@
 
     <div id="app-container" class="w-full max-w-7xl bg-white rounded-xl shadow-2xl-custom p-6 md:p-10 space-y-6">
         <h1 class="text-3xl md:text-4xl font-extrabold text-center text-indigo-700 mb-2">
-            Nucor ASU Full Plant Operations Simulator (PID Training View)
+            ASU Simulator (PID Training View)
         </h1>
         <p class="text-center text-sm text-gray-600 mb-6">
             **Operator Goal:** Master Startup Sequence (Steps 1-5), then **Tune PID Controllers** (Step 6) to stabilize column levels and purity.
@@ -74,6 +74,7 @@
                 <select id="controller-select" class="w-full p-2 border border-gray-300 rounded-lg text-sm bg-white">
                     <option value="FIC540">MAC Air Flow (FIC-540)</option>
                     <option value="PIC110">MAC Disch Press (PIC-110)</option>
+                    <option value="FIC610">Expander Flow (FIC-610)</option>
                     <option value="LIC956">HP Sump Level (LIC-956)</option>
                     <option value="LIC920">LP Sump Level (LIC-920)</option>
                 </select>
@@ -200,7 +201,7 @@
 
         <!-- Product Storage Tanks -->
         <div class="pt-4">
-            <h2 class="text-xl font-bold text-gray-700 mb-3 reject-center">5. Product Storage & Delivery</h2>
+            <h2 class="text-xl font-bold text-gray-700 mb-3 text-center">5. Product Storage & Delivery</h2>
             <div class="grid grid-cols-5 gap-6">
                 
                 <!-- LOX Tank (TK-1410) -->
@@ -279,21 +280,22 @@
         const LAL_LEVEL = 75; // LP Sump High Level ALARM (LIC-920, from manual 80% setpoint)
         const LALL_LEVEL = 60; // LP Sump Low Level ALARM (LIC-920, from manual 75% alarm)
         const LLL_TRIP = 10; // LP Sump Low-Low Level TRIP (Set very low for safety)
-        const PIC2303_SP = 3.0; // LP Column pressure setpoint (3 psig from manual)
-        const PIC110_SP = 95.0; // MAC Discharge Pressure SP
+        const PIC2303_SP = 25.0; // LP Column pressure setpoint (25 psia/ ~10.5 psig)
 
         // PID DEFAULT TUNING VALUES (Kp, Ti, Td) - Start slightly unstable or conservative
         const PID_DEFAULTS = {
             FIC540: { Kp: 1.0, Ti: 20, Td: 0.0, SP: 40 }, 
-            PIC110: { Kp: 0.8, Ti: 5, Td: 0.0, SP: PIC110_SP }, 
-            LIC956: { Kp: 0.5, Ti: 50, Td: 0.0, SP: 65 }, 
-            LIC920: { Kp: 0.8, Ti: 30, Td: 0.0, SP: 65 }
+            PIC110: { Kp: 0.8, Ti: 5, Td: 0.0, SP: 95.0 }, // MAC Disch Press
+            FIC610: { Kp: 1.5, Ti: 10, Td: 0.0, SP: 50.0 }, // Expander Flow (50% nominal)
+            LIC956: { Kp: 0.5, Ti: 50, Td: 0.0, SP: 65 }, // HP Level (Reflux)
+            LIC920: { Kp: 0.8, Ti: 30, Td: 0.0, SP: 65 }  // LP Level (Draw)
         };
 
         // CURRENT PID PARAMETERS
         var currentPID = {
             FIC540: { Kp: PID_DEFAULTS.FIC540.Kp, Ti: PID_DEFAULTS.FIC540.Ti, Td: PID_DEFAULTS.FIC540.Td, SP: PID_DEFAULTS.FIC540.SP, errorIntegral: 0, lastError: 0 },
             PIC110: { Kp: PID_DEFAULTS.PIC110.Kp, Ti: PID_DEFAULTS.PIC110.Ti, Td: PID_DEFAULTS.PIC110.Td, SP: PID_DEFAULTS.PIC110.SP, errorIntegral: 0, lastError: 0 },
+            FIC610: { Kp: PID_DEFAULTS.FIC610.Kp, Ti: PID_DEFAULTS.FIC610.Ti, Td: PID_DEFAULTS.FIC610.Td, SP: PID_DEFAULTS.FIC610.SP, errorIntegral: 0, lastError: 0 },
             LIC956: { Kp: PID_DEFAULTS.LIC956.Kp, Ti: PID_DEFAULTS.LIC956.Ti, Td: PID_DEFAULTS.LIC956.Td, SP: PID_DEFAULTS.LIC956.SP, errorIntegral: 0, lastError: 0 },
             LIC920: { Kp: PID_DEFAULTS.LIC920.Kp, Ti: PID_DEFAULTS.LIC920.Ti, Td: PID_DEFAULTS.LIC920.Td, SP: PID_DEFAULTS.LIC920.SP, errorIntegral: 0, lastError: 0 }
         };
@@ -399,7 +401,12 @@
             } else if (selectedControllerId === 'PIC110') {
                 PV = gameState.mac.dischargePressure;
                 SP = pid.SP;
-                units = 'PSI';
+                units = ' PSI';
+            } else if (selectedControllerId === 'FIC610') {
+                 // Expander flow is not directly tracked in state, assume 50% max MAC flow for PV visualization
+                 PV = 50 * (gameState.mac.airFlow / T_FLOW_MAX); // Simplified Exp Flow PV
+                 SP = pid.SP;
+                 units = '%';
             } else if (selectedControllerId === 'LIC956') {
                 PV = gameState.coldbox.hpLevel;
                 SP = pid.SP;
@@ -500,6 +507,7 @@
             var inputFlow = gameState.mac.airFlow / T_FLOW_MAX; // Normalized flow 0 to 1
             var refluxPV = gameState.coldbox.hpLevel; // LIC-956 PV
             var drawPV = gameState.coldbox.lpLevel;   // LIC-920 PV
+            var expanderFlowPV = 50 * (gameState.mac.airFlow / T_FLOW_MAX); // Simplified Exp Flow PV
 
             // 1. PID Control Outputs
             // HP Sump Level (LIC-956) controls Reflux (HV-1030)
@@ -509,22 +517,32 @@
             // LP Sump Level (LIC-920) controls LOX Draw (PM-0914)
             var drawCO = calculatePID('LIC920', drawPV, currentPID.LIC920.SP, DT_COLDBOX);
             var loxDrawRate = drawCO / 100;
+
+            // Expander Flow (FIC-610) controls Refrigeration Rate
+            var expanderCO = calculatePID('FIC610', expanderFlowPV, currentPID.FIC610.SP, DT_COLDBOX);
+            var refrigerationRate = expanderCO / 100; // Normalized refrigeration factor
+
+            // LP Column Pressure (PIC-2303) - Simplified, non-tunable P-Only control for stability
+            var lpPressureError = PIC2303_SP - gameState.coldbox.lpPressure;
+            var lpVentCO = Math.max(0, lpPressureError * 10); // Aggressive P-Control on vent
             
             // Update display values to reflect the automatic CO (output of the PID)
-            D.hpLpRefluxValue.textContent = refluxCO.toFixed(0);
-            D.loxDrawValue.textContent = drawCO.toFixed(0);
+            D.hpLpRefluxInput.value = refluxCO.toFixed(0);
+            D.loxDrawInput.value = drawCO.toFixed(0);
 
             // 2. Pressure and Flow Dynamics (Simplified)
             var hpPressureChange = (inputFlow * 5) - (refluxSP * 2) - (gameState.coldbox.hpPressure - P_HP_NOMINAL) * 0.1;
             gameState.coldbox.hpPressure = Math.max(P_LP_NOMINAL, gameState.coldbox.hpPressure + hpPressureChange);
 
-            // LP Column Pressure (PIC-2303 - Simplified control)
-            // Assumed LP GAN Vent (PV-2303) is handling this pressure
-            gameState.coldbox.lpPressure = P_LP_NOMINAL + (Math.random() - 0.5) + (P_HP_NOMINAL - gameState.coldbox.hpPressure) * 0.1; // Pressure slightly linked to HP Col
+            // LP Column Pressure is stabilized by auto-venting
+            var lpPressureIn = (inputFlow * 1) + (refluxSP * 0.5); // Flow and reflux add pressure
+            var lpPressureOut = lpVentCO * 0.1; // Vent removes pressure aggressively
+            gameState.coldbox.lpPressure += (lpPressureIn - lpPressureOut) * 0.1 + (Math.random() - 0.5) * 0.1;
+            gameState.coldbox.lpPressure = Math.max(P_AMBIENT, gameState.coldbox.lpPressure); // Cannot drop below ambient
             
             // 3. Liquid Levels (Crucial)
-            // HP Sump Level (LIC-956): Increases with MAC flow, decreases with Reflux (HV-1030 CO)
-            var condensingRate = inputFlow * 5;
+            // HP Sump Level (LIC-956): Increases with MAC flow/Refrig, decreases with Reflux (HV-1030 CO)
+            var condensingRate = (inputFlow * 5) * (1 + refrigerationRate * 0.5); // Refrigeration boosts condensation
             var refluxRate = refluxSP * 5;
             gameState.coldbox.hpLevel += (condensingRate - refluxRate) * 0.5; // Dampening factor
             gameState.coldbox.hpLevel = Math.max(0, Math.min(100, gameState.coldbox.hpLevel));
@@ -572,12 +590,23 @@
         // --- INTERLOCK AND TRIP FUNCTIONS ---
         function checkTrips() {
             if (gameState.mac.state !== 'RUNNING' && gameState.mac.state !== 'STARTING') return;
-            // (Checks omitted for brevity - see full code logic below for checks)
+            
             if (gameState.utilities.coolingWater < P_TRIP_CW_LL) { tripMac("Cooling Water Failure (PI-3000 LL)"); return; }
             if (gameState.lubeOil.pressure < P_TRIP_LUBE_LL) { tripMac("Lube Oil Failure (PI-181 LL)"); return; }
             if (gameState.mac.motorAmps > T_LIMIT_AMPS) { tripMac("Motor Overload (IIC-110 Trip)"); return; }
-            if (controlCycleCount > SURGE_CYCLES_BYPASS && gameState.mac.airFlow < T_SURGE_POINT / 100 * T_FLOW_MAX && gameState.mac.igvPosition > 10) { tripMac("Severe Surge Detected (SIC-115 Trip)"); return; }
-            if (gameState.coldbox.state === 'COOLING' && gameState.ppu.impuritiesPPM > IMPURITY_PPM_COLDBOX_TRIP) { tripMac("Impurity Breakthrough (HA-210) - COLD BOX TRIP"); coldBoxBottleUp("Impurity Breakthrough"); }
+            
+            // Surge Trip (SIC-115): Only trip if SEVERELY in surge AND vent is not responding
+            var surgeTripFlow = T_SURGE_POINT / 100 * T_FLOW_MAX * 0.8; 
+            if (controlCycleCount > SURGE_CYCLES_BYPASS) {
+                if (gameState.mac.airFlow < surgeTripFlow && gameState.mac.igvPosition > 15 && gameState.mac.ventPosition < 80) {
+                    tripMac("Severe Surge Detected (SIC-115 Trip)"); 
+                    return; 
+                }
+            }
+
+            if (gameState.coldbox.state === 'COOLING' || gameState.coldbox.state === 'RUNNING') {
+                if (gameState.ppu.impuritiesPPM > IMPURITY_PPM_COLDBOX_TRIP) { tripMac("Impurity Breakthrough (HA-210) - COLD BOX TRIP"); coldBoxBottleUp("Impurity Breakthrough"); }
+            }
         }
 
         function tripMac(reason) {
@@ -644,8 +673,8 @@
             }
             
             controlCycleCount = 0; 
-            currentPID.FIC540.errorIntegral = 0; // Reset integral term on startup
-            currentPID.PIC110.errorIntegral = 0; // Reset PIC integral
+            currentPID.FIC540.errorIntegral = 0;
+            currentPID.PIC110.errorIntegral = 0;
 
             debug("[MAC] Start Command issued. Motor energizing...");
             gameState.mac.state = 'STARTING';
@@ -744,7 +773,7 @@
                     
                     COLD_BOX_INTERVAL = setInterval(runColdBoxProcess, 500);
                     
-                    D.alarmMessage.textContent = "COLD BOX RUNNING. Adjust Reflux and Draw to stabilize levels!";
+                    D.alarmMessage.textContent = "COLD BOX RUNNING. PID Controllers LIC-956 & LIC-920 Active!";
                     D.coldboxStartBtn.textContent = 'COLD BOX RUNNING';
                     updateUI();
                     return;
@@ -760,7 +789,7 @@
                 
                 updateUI();
             }, 500);
-            debug("[COLDBOX] Cryogenic cooling initiated. Stabilize flows once running!");
+            debug("[COLDBOX] Cryogenic cooling initiated. PIDs will stabilize levels once running!");
             updateUI();
         }
         
@@ -841,7 +870,6 @@
             var macSpeed = gameState.mac.state === 'TRIPPED' ? 'TRIP' : gameState.mac.speed;
             D.macDetail.textContent = `Speed: ${macSpeed} | Amps: ${gameState.mac.motorAmps.toFixed(1)}A | Vent: ${gameState.mac.ventPosition.toFixed(0)}%`;
             
-            // FIX: Ensure D.dischargePressureDetail is checked for null before setting textContent
             if (D.dischargePressureDetail) {
                D.dischargePressureDetail.textContent = `${gameState.mac.dischargePressure.toFixed(1)} PSI`;
             }
@@ -857,7 +885,7 @@
             D.hpPressureDisplay.textContent = `${gameState.coldbox.hpPressure.toFixed(1)} PSI`;
             D.hpLevelDisplay.textContent = `${gameState.coldbox.hpLevel.toFixed(0)} %`;
             D.lpLevelDisplay.textContent = `${gameState.coldbox.lpLevel.toFixed(0)} %`;
-            D.coldboxStatus.innerHTML = `Temp: <span class="${gameState.coldbox.temperature < T_AMBIENT ? 'status-ok' : 'status-fail'}">${gameState.coldbox.temperature.toFixed(1)} °F</span> | PPU Out: <span id="ppu-out-temp-display-span" class="${gameState.chiller.airTemperature < T_AMBIENT ? 'status-ok' : 'status-fail'}">${gameState.chiller.airTemperature.toFixed(1)} °F</span>`;
+            D.coldboxStatus.innerHTML = `Temp: <span class="${gameState.coldbox.temperature < T_AMBIENT ? 'status-ok' : 'status-fail'}">${gameState.coldbox.temperature.toFixed(1)} °F</span>`;
             
             // PFD detail panel updates
             if (D.hpPressureDetail) D.hpPressureDetail.textContent = `${gameState.coldbox.hpPressure.toFixed(1)} PSI`;
