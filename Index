@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ASU Full Plant Operations Simulator (PFD View)</title>
+    <title>ASU Full Plant Operations Simulator (PID Training View)</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap" rel="stylesheet">
     <style>
@@ -30,10 +30,10 @@
 
     <div id="app-container" class="w-full max-w-7xl bg-white rounded-xl shadow-2xl-custom p-6 md:p-10 space-y-6">
         <h1 class="text-3xl md:text-4xl font-extrabold text-center text-indigo-700 mb-2">
-            Nucor ASU Full Plant Operations Simulator (PFD View)
+            Nucor ASU Full Plant Operations Simulator (PID Training View)
         </h1>
         <p class="text-center text-sm text-gray-600 mb-6">
-            **Operator Goal:** Complete safe startup and stabilize column levels & purity under normal operation.
+            **Operator Goal:** Master Startup Sequence (Steps 1-5), then **Tune PID Controllers** (Step 6) to stabilize column levels and purity.
         </p>
 
         <!-- Main Status Display -->
@@ -48,11 +48,11 @@
                     <p id="hp-pressure-display" class="text-2xl font-bold">14.5 PSI</p>
                 </div>
                 <div class="p-2 bg-gray-50 rounded-lg">
-                    <p class="text-sm text-gray-500">HP Sump Level (CY-0611)</p>
+                    <p class="text-sm text-gray-500">HP Sump Level (LIC-956)</p>
                     <p id="hp-level-display" class="text-2xl font-bold text-gray-700">0 %</p>
                 </div>
                 <div class="p-2 bg-gray-50 rounded-lg">
-                    <p class="text-sm text-gray-500">LP Sump Level (CY-0612)</p>
+                    <p class="text-sm text-gray-500">LP Sump Level (LIC-920)</p>
                     <p id="lp-level-display" class="text-2xl font-bold text-gray-700">0 %</p>
                 </div>
                 <div class="p-2 bg-gray-50 rounded-lg">
@@ -80,6 +80,32 @@
                 <div class="text-sm text-gray-700 pt-2">MAC Pre-Start State:</div>
                 <div id="igv-status" class="text-sm text-gray-700 border p-1 rounded-md cursor-pointer hover:bg-gray-200">IGV (FV-101): <span class="status-fail">OPEN - CLICK TO CLOSE</span></div>
                 <div id="vent-status" class="text-sm text-gray-700 border p-1 rounded-md cursor-pointer hover:bg-gray-200">Vent (PV-130): <span class="status-fail">CLOSED - CLICK TO OPEN</span></div>
+                
+                <div class="pt-4 border-t border-gray-300">
+                    <h3 class="text-lg font-bold text-indigo-700 mb-2">6. PID Tuning</h3>
+                    <p class="text-xs text-gray-500 mb-2">Select controller & tune for Quarter Amplitude Decay.</p>
+                    
+                    <select id="controller-select" class="w-full p-2 border border-gray-300 rounded-lg text-sm bg-white mb-2">
+                        <option value="FIC540">MAC Air Flow (FIC-540)</option>
+                        <option value="LIC956">HP Sump Level (LIC-956)</option>
+                        <option value="LIC920">LP Sump Level (LIC-920)</option>
+                    </select>
+
+                    <div id="pid-parameters" class="bg-white p-2 rounded-lg space-y-1">
+                        <p class="text-xs font-semibold text-gray-800" id="pid-pv-sp-display">PV: 0.0% | SP: 50.0%</p>
+
+                        <label for="kp-slider" class="block text-xs font-medium text-gray-700">Gain (Kp): <span id="kp-value">0.0</span></label>
+                        <input type="range" id="kp-slider" min="0.0" max="10.0" step="0.1" value="0.0" class="w-full">
+                        
+                        <label for="ti-slider" class="block text-xs font-medium text-gray-700">Integral Time (Ti): <span id="ti-value">999</span>s</label>
+                        <input type="range" id="ti-slider" min="0" max="100" step="1" value="99" class="w-full">
+                        
+                        <label for="td-slider" class="block text-xs font-medium text-gray-700">Derivative Time (Td): <span id="td-value">0.0</span>s</label>
+                        <input type="range" id="td-slider" min="0.0" max="10.0" step="0.5" value="0.0" class="w-full">
+
+                        <button id="update-pid-btn" class="w-full p-1 bg-indigo-500 text-white text-xs rounded-lg hover:bg-indigo-600">Apply Tuning</button>
+                    </div>
+                </div>
             </div>
             
             <!-- PFD FLOW PATH -->
@@ -269,6 +295,20 @@
         const LALL_LEVEL = 60; // LP Sump Low Level ALARM (LIC-920, from manual 75% alarm)
         const LLL_TRIP = 10; // LP Sump Low-Low Level TRIP (Set very low for safety)
 
+        // PID DEFAULT TUNING VALUES (Kp, Ti, Td) - Start slightly unstable or conservative
+        const PID_DEFAULTS = {
+            FIC540: { Kp: 1.0, Ti: 20, Td: 0.0, SP: 40 }, // MAC Flow
+            LIC956: { Kp: 0.5, Ti: 50, Td: 0.0, SP: 65 }, // HP Level (Reflux)
+            LIC920: { Kp: 0.8, Ti: 30, Td: 0.0, SP: 65 }  // LP Level (Draw)
+        };
+
+        // CURRENT PID PARAMETERS
+        var currentPID = {
+            FIC540: { Kp: PID_DEFAULTS.FIC540.Kp, Ti: PID_DEFAULTS.FIC540.Ti, Td: PID_DEFAULTS.FIC540.Td, SP: PID_DEFAULTS.FIC540.SP, errorIntegral: 0, lastError: 0 },
+            LIC956: { Kp: PID_DEFAULTS.LIC956.Kp, Ti: PID_DEFAULTS.LIC956.Ti, Td: PID_DEFAULTS.LIC956.Td, SP: PID_DEFAULTS.LIC956.SP, errorIntegral: 0, lastError: 0 },
+            LIC920: { Kp: PID_DEFAULTS.LIC920.Kp, Ti: PID_DEFAULTS.LIC920.Ti, Td: PID_DEFAULTS.LIC920.Td, SP: PID_DEFAULTS.LIC920.SP, errorIntegral: 0, lastError: 0 }
+        };
+
         // --- GLOBAL STATE & INTERVALS (Using var for robust environment execution) ---
         var gameState = {};
         var D = {};
@@ -276,6 +316,40 @@
         var MAC_INTERVAL = null;
         var COLD_BOX_INTERVAL = null;
         var controlCycleCount = 0;
+        const DT = 0.2; // Time step for MAC loop in seconds (matching interval 200ms)
+        const DT_COLDBOX = 0.5; // Time step for cold box in seconds
+
+        // --- PID CALCULATION FUNCTION ---
+        function calculatePID(controllerId, PV, SP, dt) {
+            const pid = currentPID[controllerId];
+            const error = SP - PV;
+            
+            // Proportional Term
+            const P = pid.Kp * error;
+            
+            // Integral Term (Implemented only if Ti > 0.01)
+            let I = 0;
+            if (pid.Ti > 0.01) {
+                pid.errorIntegral += error * dt;
+                I = (pid.Kp / pid.Ti) * pid.errorIntegral;
+            } else {
+                pid.errorIntegral = 0;
+            }
+            
+            // Derivative Term
+            const derivative = (error - pid.lastError) / dt;
+            const D_term = pid.Td > 0 ? pid.Kp * pid.Td * derivative : 0;
+            
+            pid.lastError = error;
+            
+            // Controller Output (CO)
+            let CO = P + I + D_term;
+            
+            // Clamp output between 0 and 100
+            CO = Math.max(0, Math.min(100, CO));
+
+            return CO; // Returns the desired valve/slider position (0-100%)
+        }
 
         // --- UTILITY FUNCTIONS ---
 
@@ -304,36 +378,88 @@
                 gameState.mac.ventPosition >= 98
             );
         }
+        
+        function applyPIDTuning() {
+            const selectedControllerId = D.controllerSelect.value;
+            const kp = parseFloat(D.kpSlider.value);
+            const ti = parseFloat(D.tiSlider.value);
+            const td = parseFloat(D.tdSlider.value);
+
+            currentPID[selectedControllerId].Kp = kp;
+            currentPID[selectedControllerId].Ti = ti;
+            currentPID[selectedControllerId].Td = td;
+            currentPID[selectedControllerId].errorIntegral = 0; // Reset integral on new tuning
+            currentPID[selectedControllerId].lastError = 0;
+
+            debug(`[TUNING] ${selectedControllerId} updated: Kp=${kp.toFixed(1)}, Ti=${ti.toFixed(1)}s, Td=${td.toFixed(1)}s.`);
+            updatePIDPanel();
+        }
+
+        function updatePIDPanel() {
+            const selectedControllerId = D.controllerSelect.value;
+            const pid = currentPID[selectedControllerId];
+
+            let PV, SP, units;
+            if (selectedControllerId === 'FIC540') {
+                PV = (gameState.mac.airFlow / T_FLOW_MAX) * 100;
+                SP = pid.SP;
+                units = '%';
+            } else if (selectedControllerId === 'LIC956') {
+                PV = gameState.coldbox.hpLevel;
+                SP = pid.SP;
+                units = '%';
+            } else if (selectedControllerId === 'LIC920') {
+                PV = gameState.coldbox.lpLevel;
+                SP = pid.SP;
+                units = '%';
+            }
+
+            D.pidPVSPSummary.textContent = `PV: ${PV.toFixed(1)}${units} | SP: ${SP.toFixed(1)}${units}`;
+            D.kpSlider.value = pid.Kp.toFixed(1);
+            D.tiSlider.value = pid.Ti.toFixed(0);
+            D.tdSlider.value = pid.Td.toFixed(1);
+            D.kpValueDisplay.textContent = pid.Kp.toFixed(1);
+            D.tiValueDisplay.textContent = pid.Ti.toFixed(0);
+            D.tdValueDisplay.textContent = pid.Td.toFixed(1);
+        }
 
         // --- MAC AND COLD BOX PROCESS LOOPS ---
 
         function runMacProcess() {
             controlCycleCount++;
 
-            var flowSP = parseFloat(D.flowSetPoint.value);
-            var ventPSP = 90;
+            // Use PID output as the new flow setpoint (PV for FIC-540 is Flow %)
+            var flowSP = currentPID.FIC540.SP; 
 
             // 1. Control Loops (FIC-540, PIC-130)
             var requiredFlow = flowSP / 100 * T_FLOW_MAX;
-            var flowError = requiredFlow - gameState.mac.airFlow;
+            var flowPV = (gameState.mac.airFlow / T_FLOW_MAX) * 100;
             var igvChange = 0;
             var ventChange = 0;
+            var igvCO = 0;
 
             if (gameState.mac.state === 'RUNNING') {
-                igvChange = flowError * 0.05;
-                var pressureDiff = gameState.mac.dischargePressure - ventPSP;
-                ventChange = Math.max(0, pressureDiff * 1.0);
+                // FIC-540 PID: Calculates the IGV position (Controller Output)
+                igvCO = calculatePID('FIC540', flowPV, flowSP, DT);
 
+                // --- IGV Actuation ---
+                igvChange = (igvCO - gameState.mac.igvPosition) * 0.1; // Slow down valve movement
+                
+                // PIC-130: Discharge Pressure Vent Control (Simple P-Only)
+                var pressureDiff = gameState.mac.dischargePressure - 95.0; // Target P is 95 PSI (Nominal)
+                ventChange = Math.max(0, pressureDiff * 2.0); // Aggressive Venting if high pressure
+
+                // 2. Anti-Surge Control (SIC-115) - High-select vent
                 var surgeThresholdFlow = T_FLOW_MAX * (T_SURGE_POINT / 100);
                 if (gameState.mac.airFlow < surgeThresholdFlow + 10 && gameState.mac.airFlow > 0) {
                     var surgeBias = (surgeThresholdFlow - gameState.mac.airFlow) * 2.0;
                     ventChange = Math.max(ventChange, surgeBias);
-                    // Only log surge action if the system is stable (after startup bypass)
                     if (controlCycleCount > SURGE_CYCLES_BYPASS) {
-                        debug(`[SIC-115] Surge avoidance active. Venting flow (${surgeBias.toFixed(1)}%).`, true);
+                         debug(`[SIC-115] Surge avoidance active. Venting flow (${surgeBias.toFixed(1)}%).`, true);
                     }
                 }
 
+                // 3. Current Limit Control (IIC-110) - Low-select IGV closure
                 if (gameState.mac.motorAmps > T_LIMIT_AMPS - 50) {
                     var currentLimitBias = (gameState.mac.motorAmps - (T_LIMIT_AMPS - 50)) * -0.5;
                     igvChange = Math.min(igvChange, currentLimitBias);
@@ -343,13 +469,12 @@
 
             // 4. Update Component Positions
             gameState.mac.igvPosition = Math.max(0, Math.min(100, gameState.mac.igvPosition + igvChange));
-            gameState.mac.ventPosition = Math.max(0, Math.min(100, gameState.mac.ventPosition + ventChange));
+            gameState.mac.ventPosition = Math.max(0, Math.min(100, ventChange));
 
-            // 5. Recalculate Process Variables
+            // 5. Recalculate Process Variables (Physics Model)
             var baseAmps = (gameState.mac.igvPosition / 100) * (gameState.mac.dischargePressure / 90) * T_LIMIT_AMPS * 1.1;
             gameState.mac.motorAmps = Math.min(T_LIMIT_AMPS * 1.05, Math.max(0, baseAmps + (Math.random() - 0.5) * 5));
 
-            // The air flow available to the cold box (total MAC flow - vented flow)
             gameState.mac.airFlow = (gameState.mac.igvPosition / 100) * T_FLOW_MAX * (1 - (gameState.mac.ventPosition / 100) * 0.5);
 
             var pressureIn = gameState.mac.airFlow * 0.2;
@@ -371,106 +496,100 @@
         }
 
         function runColdBoxProcess() {
-            var inputFlow = gameState.mac.airFlow / T_FLOW_MAX; // Normalize flow 0 to 1
-            var refluxSP = parseFloat(D.hpLpRefluxInput.value) / 100; // HV-1030
-            var loxDrawRate = parseFloat(D.loxDrawInput.value) / 100; // PM-0914 Draw
+            // Process variables
+            var inputFlow = gameState.mac.airFlow / T_FLOW_MAX; // Normalized flow 0 to 1
+            var refluxPV = gameState.coldbox.hpLevel; // LIC-956 PV
+            var drawPV = gameState.coldbox.lpLevel;   // LIC-920 PV
 
-            // 1. Pressure and Flow Dynamics (Simplified)
+            // 1. PID Control Outputs
+            // HP Sump Level (LIC-956) controls Reflux (HV-1030)
+            var refluxCO = calculatePID('LIC956', refluxPV, currentPID.LIC956.SP, DT_COLDBOX);
+            var refluxSP = refluxCO / 100;
+
+            // LP Sump Level (LIC-920) controls LOX Draw (PM-0914)
+            var drawCO = calculatePID('LIC920', drawPV, currentPID.LIC920.SP, DT_COLDBOX);
+            var loxDrawRate = drawCO / 100;
+            
+            // Update display values to reflect the automatic CO (output of the PID)
+            D.hpLpRefluxValue.textContent = refluxCO.toFixed(0);
+            D.loxDrawValue.textContent = drawCO.toFixed(0);
+
+            // 2. Pressure and Flow Dynamics (Simplified)
             var hpPressureChange = (inputFlow * 5) - (refluxSP * 2) - (gameState.coldbox.hpPressure - P_HP_NOMINAL) * 0.1;
             gameState.coldbox.hpPressure = Math.max(P_LP_NOMINAL, gameState.coldbox.hpPressure + hpPressureChange);
-
-            // 2. Liquid Levels (Crucial)
-            // HP Sump Level (LIC-956)
+            
+            // 3. Liquid Levels (Crucial)
+            // HP Sump Level (LIC-956): Increases with MAC flow, decreases with Reflux (HV-1030 CO)
             var condensingRate = inputFlow * 5;
             var refluxRate = refluxSP * 5;
-            gameState.coldbox.hpLevel += (condensingRate - refluxRate);
+            gameState.coldbox.hpLevel += (condensingRate - refluxRate) * 0.5; // Dampening factor
             gameState.coldbox.hpLevel = Math.max(0, Math.min(100, gameState.coldbox.hpLevel));
 
-            // LP Sump Level (LIC-920)
-            var loxProduction = refluxRate * 1.1; // HP reflux becomes LOX production
+            // LP Sump Level (LIC-920): Increases with Reflux, decreases with Product Draw (PM-0914 CO)
+            var loxProduction = refluxRate * 1.1;
             var loxDraw = loxDrawRate * 5; 
-            gameState.coldbox.lpLevel += (loxProduction - loxDraw);
+            gameState.coldbox.lpLevel += (loxProduction - loxDraw) * 0.5;
             gameState.coldbox.lpLevel = Math.max(0, Math.min(100, gameState.coldbox.lpLevel));
 
-            // 3. Product Purity & Yield (Controlled by HP Level/Reflux)
-            // High reflux (high HV-1030 flow) drains HP sump but improves O2 purity
+            // 4. Product Purity & Yield (Controlled by HP Level/Reflux)
             var purityDriver = Math.max(0.1, gameState.coldbox.hpLevel - 50);
             gameState.coldbox.o2Purity = 99.9 - (purityDriver * 0.05);
             gameState.coldbox.o2Purity = Math.max(90, Math.min(99.99, gameState.coldbox.o2Purity));
 
-            // 4. Tank Levels
-            // LOX Tank (TK-1410) - Supplied by LP Draw
+            // 5. Tank Levels (Simplified accumulation)
             gameState.storage.loxLevel += loxDraw * 0.5;
-            gameState.storage.loxLevel = Math.max(0, Math.min(100, gameState.storage.loxLevel));
-            // LIN Tank - Constant production (simplified)
             gameState.storage.linLevel += 0.5;
-            gameState.storage.linLevel = Math.max(0, Math.min(100, gameState.storage.linLevel));
-            // LAR Tank - Very slow production
             gameState.storage.larLevel += 0.1;
+            gameState.storage.loxLevel = Math.max(0, Math.min(100, gameState.storage.loxLevel));
+            gameState.storage.linLevel = Math.max(0, Math.min(100, gameState.storage.linLevel));
             gameState.storage.larLevel = Math.max(0, Math.min(100, gameState.storage.larLevel));
 
-            // 5. Check Critical Interlocks & Alarms
+            // 6. Check Critical Interlocks & Alarms
             if (gameState.coldbox.hpLevel > 95) {
-                // LIC-956 HI-HI Trip
                 tripMac("HP Column Flood (LIC-956 HI-HI)");
                 coldBoxBottleUp("HP Column High Level");
                 return;
             }
             if (gameState.coldbox.lpLevel < LLL_TRIP) {
-                // LIC-920 LO-LO Trip
-                tripMac("LP Column LOX Loss (PM-0914 Cavitation)");
-                coldBoxBottleUp("LP Sump Low-Low Level");
-                return;
+                 tripMac("LP Column LOX Loss (LIC-920 LO-LO Trip)");
+                 coldBoxBottleUp("LP Sump Low-Low Level");
+                 return;
             }
             if (gameState.coldbox.lpLevel < LALL_LEVEL && gameState.coldbox.lpLevel > LLL_TRIP) {
-                // LIC-920 LAL Alarm (75% on descent, 60% low-low alarm)
-                D.alarmMessage.textContent = `WARNING: LP Sump Level LOW! (${gameState.coldbox.lpLevel.toFixed(0)}%). Reduce LOX Draw.`;
+                 D.alarmMessage.textContent = `WARNING: LP Sump Level LOW! (${gameState.coldbox.lpLevel.toFixed(0)}%). Adjust LIC-920 Tuning.`;
             }
             if (gameState.coldbox.o2Purity < 95.0) {
-                debug(`[ALARM] O₂ Purity LOW (${gameState.coldbox.o2Purity.toFixed(2)}%). Increase HP->LP Reflux!`, true);
+                 debug(`[ALARM] O₂ Purity LOW (${gameState.coldbox.o2Purity.toFixed(2)}%). Increase Reflux Rate!`, true);
             }
         
             updateUI();
         }
 
         // --- INTERLOCK AND TRIP FUNCTIONS ---
-
         function checkTrips() {
             if (gameState.mac.state !== 'RUNNING' && gameState.mac.state !== 'STARTING') return;
-
-            // T: Low Cooling Water (PI-3000 LL)
-            if (gameState.utilities.coolingWater < P_TRIP_CW_LL) {
-                tripMac("Cooling Water Failure (PI-3000 LL)");
-                return;
-            }
-            // T: Low Lube Oil Pressure (PI-181 LL)
-            if (gameState.lubeOil.pressure < P_TRIP_LUBE_LL) {
-                tripMac("Lube Oil Failure (PI-181 LL)");
-                return;
-            }
-            // T: High Amps (IIC-110)
-            if (gameState.mac.motorAmps > T_LIMIT_AMPS) {
-                tripMac("Motor Overload (IIC-110 Trip)");
-                return;
-            }
-            // T: Surge (SIC-115) - TRIPPED ONLY AFTER STARTUP BYPASS
-            if (controlCycleCount > SURGE_CYCLES_BYPASS) {
-                if (gameState.mac.airFlow < T_SURGE_POINT / 100 * T_FLOW_MAX && gameState.mac.igvPosition > 10) {
-                    tripMac("Severe Surge Detected (SIC-115 Trip)");
-                    return;
-                }
-            } else {
-                // Initial startup: Ignore surge trip but allow vent to open aggressively
-                if (gameState.mac.airFlow < T_SURGE_POINT / 100 * T_FLOW_MAX) {
-                    // Force the vent wide open to prevent trip during unstable acceleration
-                    gameState.mac.ventPosition = 100; 
-                }
-            }
             
-            // T: Impurity Breakthrough
-            if (gameState.coldbox.state === 'COOLING' && gameState.ppu.impuritiesPPM > IMPURITY_PPM_COLDBOX_TRIP) {
-                tripMac("Impurity Breakthrough (HA-210) - COLD BOX TRIP");
-                coldBoxBottleUp("Impurity Breakthrough");
+            if (gameState.utilities.coolingWater < P_TRIP_CW_LL) { 
+                tripMac("Cooling Water Failure (PI-3000 LL)"); 
+                return; 
+            }
+            if (gameState.lubeOil.pressure < P_TRIP_LUBE_LL) { 
+                tripMac("Lube Oil Failure (PI-181 LL)"); 
+                return; 
+            }
+            if (gameState.mac.motorAmps > T_LIMIT_AMPS) { 
+                tripMac("Motor Overload (IIC-110 Trip)"); 
+                return; 
+            }
+            if (controlCycleCount > SURGE_CYCLES_BYPASS && gameState.mac.airFlow < T_SURGE_POINT / 100 * T_FLOW_MAX && gameState.mac.igvPosition > 10) { 
+                tripMac("Severe Surge Detected (SIC-115 Trip)"); 
+                return; 
+            }
+            if (gameState.coldbox.state === 'COOLING' || gameState.coldbox.state === 'RUNNING') {
+                if (gameState.ppu.impuritiesPPM > IMPURITY_PPM_COLDBOX_TRIP) { 
+                    tripMac("Impurity Breakthrough (HA-210) - COLD BOX TRIP"); 
+                    coldBoxBottleUp("Impurity Breakthrough"); 
+                }
             }
         }
 
@@ -489,15 +608,9 @@
             D.macStartBtn.disabled = true;
 
             // INTERLOCK CASCADE: MAC Trip -> Chiller Trip, PPU Isolation, Cold Box Bottle-Up
-            if (gameState.chiller.state === 'RUNNING') {
-                stopChiller("MAC Trip");
-            }
-            if (gameState.ppu.state !== 'ISOLATED') {
-                isolatePPU("MAC Trip");
-            }
-            if (gameState.coldbox.state !== 'BOTTLE-UP' && gameState.coldbox.state !== 'WARM_IDLE') {
-                coldBoxBottleUp("MAC Trip");
-            }
+            if (gameState.chiller.state === 'RUNNING') { stopChiller("MAC Trip"); }
+            if (gameState.ppu.state !== 'ISOLATED') { isolatePPU("MAC Trip"); }
+            if (gameState.coldbox.state !== 'BOTTLE-UP' && gameState.coldbox.state !== 'WARM_IDLE') { coldBoxBottleUp("MAC Trip"); }
             
             debug(`*** CRITICAL TRIP: ${reason}. COLD BOX BOTTLE-UP INITIATED. ***`, true);
 
@@ -524,7 +637,7 @@
 
         function isolatePPU(reason) {
             gameState.ppu.state = 'ISOLATED';
-            gameState.ppu.impuritiesPPM = INITIAL_IMPURITIES; // Re-introduces impurities when isolated
+            gameState.ppu.impuritiesPPM = INITIAL_IMPURITIES;
             D.ppuStartBtn.textContent = 'START Adsorption Cycle (Purify Air)';
             D.ppuStartBtn.classList.remove('bg-green-600', 'hover:bg-green-700');
             D.ppuStartBtn.classList.add('bg-gray-400');
@@ -543,31 +656,28 @@
                 return;
             }
             
-            controlCycleCount = 0; // Reset cycle counter for new startup
+            controlCycleCount = 0; 
+            currentPID.FIC540.errorIntegral = 0; // Reset integral term on startup
 
             debug("[MAC] Start Command issued. Motor energizing...");
             gameState.mac.state = 'STARTING';
             D.alarmMessage.textContent = "MAC Accelerating (Unloaded)...";
             D.macStartBtn.disabled = true;
 
-            // Acceleration Phase
             setTimeout(() => {
                 gameState.mac.speed = 'FULL';
                 gameState.mac.state = 'RUNNING';
-                D.alarmMessage.textContent = "MAC Running. Set Flow SP (FIC-540).";
+                D.alarmMessage.textContent = "MAC Running. PID FIC-540 Active.";
                 D.flowSetPoint.disabled = false;
                 
                 // Set minimum safe flow (40%) immediately to stabilize the control loop
-                D.flowSetPoint.value = STARTUP_FLOW_SP;
-                D.flowSetPoint.dispatchEvent(new Event('input')); 
+                D.flowSetPoint.value = currentPID.FIC540.SP; // Uses the current SP from the PID panel
+                D.flowSetPointValue.textContent = currentPID.FIC540.SP;
                 
-                // Force IGV open slightly (10%) to establish minimum flow instantly.
                 gameState.mac.igvPosition = 10; 
 
-                // Start control loop
                 MAC_INTERVAL = setInterval(runMacProcess, 200);
                 
-                // Enable BAC start button
                 D.bacStartBtn.disabled = false;
                 D.bacStartBtn.classList.remove('opacity-50', 'bg-gray-400');
                 D.bacStartBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
@@ -576,8 +686,6 @@
             }, 2000);
             updateUI();
         }
-        
-        // --- CHILLER CONTROL ---
 
         function startChiller() {
             if (gameState.chiller.state !== 'STOPPED') return;
@@ -602,23 +710,21 @@
             D.chillerStartBtn.textContent = 'START Chiller';
             D.chillerStartBtn.classList.add('bg-gray-400');
             D.chillerStartBtn.classList.remove('bg-indigo-600');
-            D.ppuStartBtn.disabled = true; // PPU loses permissive
+            D.ppuStartBtn.disabled = true;
             debug(`[CHILLER] Shutdown due to ${reason}. Air temp returning to ambient.`);
             updateUI();
         }
         
-        // --- BAC CONTROL (Simplified) ---
-
         function startBAC() {
-            if (gameState.mac.state !== 'RUNNING' || gameState.chiller.state !== 'RUNNING') {
-                D.alarmMessage.textContent = "BAC START BLOCKED: MAC and Chiller must be RUNNING (Interlock).";
-                return;
-            }
-            if (gameState.mac.airFlow < T_FLOW_MAX * 0.4) {
-                D.alarmMessage.textContent = "BAC START BLOCKED: Insufficient MAC flow for BAC feed.";
-                return;
-            }
-            if (gameState.bac.state === 'RUNNING') return;
+             if (gameState.mac.state !== 'RUNNING' || gameState.chiller.state !== 'RUNNING') { 
+                 D.alarmMessage.textContent = "BAC START BLOCKED: MAC and Chiller must be RUNNING (Interlock).";
+                 return; 
+             }
+             if (gameState.mac.airFlow < T_FLOW_MAX * 0.4) { 
+                 D.alarmMessage.textContent = "BAC START BLOCKED: Insufficient MAC flow for BAC feed.";
+                 return; 
+             }
+             if (gameState.bac.state === 'RUNNING') return;
 
             gameState.bac.state = 'RUNNING';
             D.bacStartBtn.textContent = 'BAC/EXPANDER RUNNING';
@@ -629,13 +735,11 @@
             updateUI();
         }
 
-        // --- PPU CONTROL ---
-
         function startPPU() {
             if (gameState.ppu.state !== 'ISOLATED') return;
-            if (gameState.chiller.state !== 'RUNNING' || gameState.mac.airFlow === 0) {
+            if (gameState.chiller.state !== 'RUNNING' || gameState.mac.airFlow === 0) { 
                 D.alarmMessage.textContent = "PPU START BLOCKED: Chiller must be running AND MAC must have flow.";
-                return;
+                return; 
             }
 
             gameState.ppu.state = 'ADSORPTION';
@@ -649,12 +753,7 @@
             updateUI();
         }
         
-        function tripPPU() {
-            // T: Regen Heater Overtemp Trip (Simulated)
-            isolatePPU("PPU Regen Heater Overtemp (TI-511 HH)");
-        }
-
-        // --- COLD BOX CONTROL ---
+        function tripPPU() { isolatePPU("PPU Regen Heater Overtemp (TI-511 HH)"); }
 
         function startColdBoxCooling() {
             if (gameState.coldbox.state !== 'WARM_IDLE' && gameState.coldbox.state !== 'BOTTLE-UP') return;
@@ -682,27 +781,27 @@
             var currentTemp = T_AMBIENT;
             
             var initialCoolingInterval = setInterval(() => {
-                if (currentTemp <= T_CRYOGENIC + 50) { // Stop initial cooling phase 
+                if (currentTemp <= T_CRYOGENIC + 50) { 
                     clearInterval(initialCoolingInterval);
-                    gameState.coldbox.temperature = T_CRYOGENIC; // Jump to cold
+                    gameState.coldbox.temperature = T_CRYOGENIC;
                     gameState.coldbox.hpPressure = P_HP_NOMINAL;
                     gameState.coldbox.lpPressure = P_LP_NOMINAL;
                     gameState.coldbox.state = 'RUNNING';
                     
-                    // Start continuous steady-state process loop
+                    currentPID.LIC956.errorIntegral = 0; // Reset level integrals
+                    currentPID.LIC920.errorIntegral = 0;
+                    
                     COLD_BOX_INTERVAL = setInterval(runColdBoxProcess, 500);
                     
-                    D.alarmMessage.textContent = "COLD BOX RUNNING. Adjust Reflux and Draw to stabilize levels!";
+                    D.alarmMessage.textContent = "COLD BOX RUNNING. PID Controllers LIC-956 & LIC-920 Active!";
                     D.coldboxStartBtn.textContent = 'COLD BOX RUNNING';
                     updateUI();
                     return;
                 }
                 
-                // Slow cooling simulation
                 currentTemp = currentTemp - 15;
                 gameState.coldbox.temperature = currentTemp;
                 
-                // Simulate slow purity ramp during cooldown
                 if (currentTemp < 0) {
                     gameState.coldbox.o2Purity = Math.min(99.7, gameState.coldbox.o2Purity + 0.1);
                     gameState.coldbox.n2Product = Math.min(99.9, gameState.coldbox.n2Product + 0.1);
@@ -710,31 +809,28 @@
                 
                 updateUI();
             }, 500);
-            debug("[COLDBOX] Cryogenic cooling initiated. Stabilize flows once running!");
+            debug("[COLDBOX] Cryogenic cooling initiated. PIDs will stabilize levels once running!");
             updateUI();
         }
         
-        // --- TRAILER LOADING ---
         function fillTrailer(product) {
-            if (gameState.coldbox.state !== 'RUNNING') {
-                debug("[LOADING] Start Blocked: Cold Box is not in RUNNING state.", true);
-                return;
+            if (gameState.coldbox.state !== 'RUNNING') { 
+                debug("[LOADING] Start Blocked: Cold Box is not in RUNNING state.", true); 
+                return; 
             }
 
             var levelKey = `${product}Level`;
-            var maxDrawRate = 50; // Simulated constant trailer draw rate
+            var maxDrawRate = 50;
             
-            if (gameState.storage[levelKey] < 10) {
-                debug(`[LOADING] ${product.toUpperCase()} Tank Level LOW. Cannot fill trailer.`, true);
-                return;
+            if (gameState.storage[levelKey] < 10) { 
+                debug(`[LOADING] ${product.toUpperCase()} Tank Level LOW. Cannot fill trailer.`, true); 
+                return; 
             }
 
-            // Simulate draw down of storage tank
             gameState.storage[levelKey] -= maxDrawRate;
             gameState.storage[levelKey] = Math.max(0, gameState.storage[levelKey]);
             debug(`[LOADING] Started trailer fill for ${product.toUpperCase()}. Tank level dropped by ${maxDrawRate}%.`, false);
             
-            // Disable button briefly to simulate fill time
             var btnKey = `${product}FillBtn`;
             var btn = D[btnKey];
             if (btn) {
@@ -749,12 +845,12 @@
                 }
                 debug(`[LOADING] Trailer fill for ${product.toUpperCase()} complete.`, false);
                 updateUI();
-            }, 5000); // 5 seconds fill time
+            }, 5000);
             
             updateUI();
         }
 
-        // --- INITIALIZATION & UI ---
+        // --- UI & INITIALIZATION ---
 
         function updatePermissivesUI() {
             var lubeOk = gameState.lubeOil.pressure >= P_LUBE_OK;
@@ -797,12 +893,11 @@
             var macSpeed = gameState.mac.state === 'TRIPPED' ? 'TRIP' : gameState.mac.speed;
             D.macDetail.textContent = `Speed: ${macSpeed} | Amps: ${gameState.mac.motorAmps.toFixed(1)}A | Vent: ${gameState.mac.ventPosition.toFixed(0)}%`;
             
-            // FIX: Ensure D.dischargePressureDetail is checked for null before setting textContent
             if (D.dischargePressureDetail) {
-                D.dischargePressureDetail.textContent = `${gameState.mac.dischargePressure.toFixed(1)} PSI`;
+               D.dischargePressureDetail.textContent = `${gameState.mac.dischargePressure.toFixed(1)} PSI`;
             }
-            D.macFlowPipe.style.width = `${Math.min(100, (gameState.mac.airFlow / T_FLOW_MAX) * 100)}%`; // Pipe visualization
-            D.ppuFlowPipe.style.width = `${Math.min(100, (gameState.mac.airFlow / T_FLOW_MAX) * 100)}%`; // Pipe visualization
+            D.macFlowPipe.style.width = `${Math.min(100, (gameState.mac.airFlow / T_FLOW_MAX) * 100)}%`;
+            D.ppuFlowPipe.style.width = `${Math.min(100, (gameState.mac.airFlow / T_FLOW_MAX) * 100)}%`;
 
             D.macFlowDisplay.style.color = macSpeed === 'FULL' ? '#3b82f6' : '#737373';
             
@@ -818,11 +913,11 @@
             D.coldboxStatus.innerHTML = `Temp: <span class="${gameState.coldbox.temperature < T_AMBIENT ? 'status-ok' : 'status-fail'}">${gameState.coldbox.temperature.toFixed(1)} °F</span>`;
             
             // PFD detail panel updates
-            D.hpPressureDetail.textContent = `${gameState.coldbox.hpPressure.toFixed(1)} PSI`;
-            D.o2PurityDetail.textContent = `${gameState.coldbox.o2Purity.toFixed(1)} %`;
-            D.hpLevelDetail.textContent = `${gameState.coldbox.hpLevel.toFixed(0)} %`;
-            D.lpLevelDetail.textContent = `${gameState.coldbox.lpLevel.toFixed(0)} %`;
-            if (D.ppuOutTempDisplay) D.ppuOutTempDisplay.textContent = `${gameState.chiller.airTemperature.toFixed(1)} °F`; // Update PPU Out temp in Chiller Box
+            if (D.hpPressureDetail) D.hpPressureDetail.textContent = `${gameState.coldbox.hpPressure.toFixed(1)} PSI`;
+            if (D.o2PurityDetail) D.o2PurityDetail.textContent = `${gameState.coldbox.o2Purity.toFixed(1)} %`;
+            if (D.hpLevelDetail) D.hpLevelDetail.textContent = `${gameState.coldbox.hpLevel.toFixed(0)} %`;
+            if (D.lpLevelDetail) D.lpLevelDetail.textContent = `${gameState.coldbox.lpLevel.toFixed(0)} %`;
+            if (D.ppuOutTempDisplay) D.ppuOutTempDisplay.textContent = `${gameState.chiller.airTemperature.toFixed(1)} °F`;
 
             // Product Details
             D.n2Prod.textContent = `${gameState.coldbox.n2Product.toFixed(0)}%`;
@@ -838,8 +933,8 @@
             
             // Cold Box Controls activation
             var isColdBoxRunning = gameState.coldbox.state === 'RUNNING';
-            D.hpLpRefluxInput.disabled = !isColdBoxRunning;
-            D.loxDrawInput.disabled = !isColdBoxRunning;
+            D.hpLpRefluxInput.disabled = true; // Always disabled in PID mode
+            D.loxDrawInput.disabled = true; // Always disabled in PID mode
             D.loxFillBtn.disabled = !isColdBoxRunning;
             D.linFillBtn.disabled = !isColdBoxRunning;
             D.larFillBtn.disabled = !isColdBoxRunning;
@@ -847,8 +942,6 @@
             // HP/LP Sump Visualization
             D.hpSumpLevel.style.height = `${gameState.coldbox.hpLevel}%`;
             D.lpSumpLevel.style.height = `${gameState.coldbox.lpLevel}%`;
-
-            if (isColdBoxRunning) D.alarmMessage.textContent = "COLD BOX STABLE. Adjust Reflux and Draw Rates.";
             
             // BAC Start button logic
             var canStartBAC = gameState.mac.state === 'RUNNING' && gameState.chiller.state === 'RUNNING' && gameState.mac.airFlow > T_FLOW_MAX * 0.4 && gameState.bac.state === 'STOPPED';
@@ -857,9 +950,9 @@
                 D.bacStartBtn.classList.remove('opacity-50', 'bg-gray-400');
                 D.bacStartBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
             } else if (gameState.bac.state === 'STOPPED') {
-                D.bacStartBtn.disabled = true;
-                D.bacStartBtn.classList.add('opacity-50', 'bg-gray-400');
-                D.bacStartBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
+                 D.bacStartBtn.disabled = true;
+                 D.bacStartBtn.classList.add('opacity-50', 'bg-gray-400');
+                 D.bacStartBtn.classList.remove('bg-indigo-600', 'hover:bg-indigo-700');
             }
 
             // Active Step Indicator
@@ -873,6 +966,9 @@
             else if (gameState.coldbox.state === 'WARM_IDLE' || gameState.coldbox.state === 'BOTTLE-UP') D.sectionPpu.classList.add('step-active');
             else if (gameState.coldbox.state === 'COOLING') D.sectionColdbox.classList.add('step-active');
             else if (gameState.coldbox.state === 'RUNNING') D.sectionColdbox.classList.add('step-active');
+            
+            // Update PID panel display
+            updatePIDPanel();
         }
 
         // --- EVENT HANDLERS ---
@@ -901,6 +997,7 @@
         }
         
         function handleFlowSetpointChange(event) {
+            currentPID.FIC540.SP = parseFloat(event.target.value);
             D.flowSetPointValue.textContent = event.target.value;
             // Enable Chiller button once flow is established
             if (gameState.mac.state === 'RUNNING' && gameState.chiller.state === 'STOPPED') {
@@ -908,16 +1005,6 @@
                 D.chillerStartBtn.classList.remove('opacity-50', 'bg-gray-400');
                 D.chillerStartBtn.classList.add('bg-indigo-600', 'hover:bg-indigo-700');
             }
-            updateUI();
-        }
-        
-        function handleRefluxChange(event) {
-            D.hpLpRefluxValue.textContent = event.target.value;
-            updateUI();
-        }
-
-        function handleDrawChange(event) {
-            D.loxDrawValue.textContent = event.target.value;
             updateUI();
         }
 
@@ -965,21 +1052,25 @@
                 storage: { loxLevel: 50, linLevel: 50, larLevel: 50 }
             };
 
+            // Reset PID parameters to defaults
+            currentPID.FIC540 = { ...PID_DEFAULTS.FIC540, errorIntegral: 0, lastError: 0 };
+            currentPID.LIC956 = { ...PID_DEFAULTS.LIC956, errorIntegral: 0, lastError: 0 };
+            currentPID.LIC920 = { ...PID_DEFAULTS.LIC920, errorIntegral: 0, lastError: 0 };
+
             setupDOMElements();
 
             // Setup Control Defaults
-            D.flowSetPoint.value = 0;
+            D.flowSetPoint.value = currentPID.FIC540.SP;
             D.flowSetPoint.disabled = true;
             D.hpLpRefluxInput.value = 50;
             D.hpLpRefluxInput.disabled = true;
             D.loxDrawInput.value = 0;
             D.loxDrawInput.disabled = true;
             
-            // Set initial span text content manually (Robust Initialization)
+            // Set initial span text content manually
             if (D.flowSetPointValue) D.flowSetPointValue.textContent = D.flowSetPoint.value;
             if (D.hpLpRefluxValue) D.hpLpRefluxValue.textContent = D.hpLpRefluxInput.value;
             if (D.loxDrawValue) D.loxDrawValue.textContent = D.loxDrawInput.value;
-            // Also initialize derived display spans
             if (D.dischargePressureDetail) D.dischargePressureDetail.textContent = gameState.mac.dischargePressure.toFixed(1) + ' PSI';
             if (D.hpPressureDetail) D.hpPressureDetail.textContent = gameState.coldbox.hpPressure.toFixed(1) + ' PSI';
             if (D.o2PurityDetail) D.o2PurityDetail.textContent = gameState.coldbox.o2Purity.toFixed(1) + ' %';
@@ -1001,8 +1092,6 @@
             D.resetBtn.addEventListener('click', initializeSimulator);
             
             D.flowSetPoint.addEventListener('input', handleFlowSetpointChange);
-            D.hpLpRefluxInput.addEventListener('input', handleRefluxChange);
-            D.loxDrawInput.addEventListener('input', handleDrawChange);
             D.igvStatus.addEventListener('click', () => handleStartupPosition('igv'));
             D.ventStatus.addEventListener('click', () => handleStartupPosition('vent'));
 
@@ -1010,6 +1099,13 @@
             D.loxFillBtn.addEventListener('click', () => fillTrailer('lox'));
             D.linFillBtn.addEventListener('click', () => fillTrailer('lin'));
             D.larFillBtn.addEventListener('click', () => fillTrailer('lar'));
+            
+            // PID Tuning Event Listeners
+            D.controllerSelect.addEventListener('change', updatePIDPanel);
+            D.updatePIDBtn.addEventListener('click', applyPIDTuning);
+            D.kpSlider.addEventListener('input', (e) => { D.kpValueDisplay.textContent = e.target.value; });
+            D.tiSlider.addEventListener('input', (e) => { D.tiValueDisplay.textContent = e.target.value; });
+            D.tdSlider.addEventListener('input', (e) => { D.tdValueDisplay.textContent = e.target.value; });
 
             // Reset UI State
             D.coolingWaterFixBtn.textContent = 'Restore CW';
@@ -1026,6 +1122,7 @@
             var logElement = document.getElementById('debug-log');
             if (logElement) logElement.innerHTML = '<p>MAC Simulator initialized. Start by setting utilities.</p>';
             
+            updatePIDPanel();
             updateUI();
         }
 
@@ -1090,6 +1187,17 @@
             D.sectionMac = document.getElementById('section-mac');
             D.sectionPpu = document.getElementById('section-ppu');
             D.sectionColdbox = document.getElementById('section-coldbox');
+            
+            // PID Panel Elements
+            D.controllerSelect = document.getElementById('controller-select');
+            D.pidPVSPSummary = document.getElementById('pid-pv-sp-display');
+            D.kpSlider = document.getElementById('kp-slider');
+            D.tiSlider = document.getElementById('ti-slider');
+            D.tdSlider = document.getElementById('td-slider');
+            D.kpValueDisplay = document.getElementById('kp-value');
+            D.tiValueDisplay = document.getElementById('ti-value');
+            D.tdValueDisplay = document.getElementById('td-value');
+            D.updatePIDBtn = document.getElementById('update-pid-btn');
         }
 
         window.onload = initializeSimulator;
